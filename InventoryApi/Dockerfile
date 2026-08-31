@@ -1,11 +1,22 @@
+# 1. Build stage using .NET 9 SDK
 FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 WORKDIR /src
-COPY . .
-RUN dotnet publish -c Release -o /app
 
-FROM mcr.microsoft.com/dotnet/aspnet:9.0
+COPY InventoryApi.csproj .
+RUN dotnet restore
+
+COPY . .
+RUN dotnet publish -c Release -o /app/publish
+
+# 2. Runtime stage using lightweight ASP.NET 9 image
+FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS runtime
 WORKDIR /app
-COPY --from=build /app .
-EXPOSE 8080
+COPY --from=build /app/publish .
+
+# Prevent inotify limit crashes on container hosts
+ENV DOTNET_USE_POLLING_FILE_WATCHER=true
+ENV ASPNETCORE_hostInitialization__reloadConfigOnChange=false
 ENV ASPNETCORE_URLS=http://+:8080
+EXPOSE 8080
+
 ENTRYPOINT ["dotnet", "InventoryApi.dll"]
