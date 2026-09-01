@@ -20,7 +20,7 @@ public class AuthController : ControllerBase
     }
 
     [HttpPost("register")]
-    public async Task<IActionResult> Register([FromBody] AuthDto dto)
+    public async Task<IActionResult> Register([FromBody] RegisterDto dto)
     {
         if (string.IsNullOrWhiteSpace(dto.Username) || string.IsNullOrWhiteSpace(dto.Password))
             return BadRequest("Username and password are required.");
@@ -28,12 +28,12 @@ public class AuthController : ControllerBase
         if (dto.Username.Contains(" "))
             return BadRequest("Username cannot contain spaces.");
 
-        // Password complexity validation
+        if (string.IsNullOrWhiteSpace(dto.SecurityQuestion) || string.IsNullOrWhiteSpace(dto.SecurityAnswer))
+            return BadRequest("Security question and answer are required.");
+
         var passwordErrors = ValidatePassword(dto.Password);
         if (passwordErrors.Any())
-        {
             return BadRequest(string.Join(" ", passwordErrors));
-        }
 
         var exists = await _context.Users.AnyAsync(u => u.Username.ToLower() == dto.Username.ToLower());
         if (exists)
@@ -42,7 +42,10 @@ public class AuthController : ControllerBase
         var user = new User
         {
             Username = dto.Username.Trim(),
-            PasswordHash = HashPassword(dto.Password)
+            PasswordHash = HashString(dto.Password),
+            SecurityQuestion = dto.SecurityQuestion.Trim(),
+            SecurityAnswerHash = HashString(dto.SecurityAnswer.Trim().ToLowerInvariant()),
+            AvatarUrl = string.IsNullOrWhiteSpace(dto.AvatarUrl) ? "" : dto.AvatarUrl
         };
 
         _context.Users.Add(user);
@@ -52,22 +55,95 @@ public class AuthController : ControllerBase
     }
 
     [HttpPost("login")]
-    public async Task<IActionResult> Login([FromBody] AuthDto dto)
+    public async Task<IActionResult> Login([FromBody] LoginDto dto)
     {
-        var hash = HashPassword(dto.Password);
+        var hash = HashString(dto.Password);
         var user = await _context.Users
             .FirstOrDefaultAsync(u => u.Username.ToLower() == dto.Username.ToLower() && u.PasswordHash == hash);
 
         if (user == null)
             return Unauthorized("Invalid username or password.");
 
-        return Ok(new { username = user.Username });
+        return Ok(new { username = user.Username, avatarUrl = user.AvatarUrl });
+    }
+
+    // 1. Get Security Question for Forgot Password
+    [HttpPost("get-question")]
+    public async Task<IActionResult> GetSecurityQuestion([FromBody] GetSecurityQuestionDto dto)
+    {
+        var user = await _context.Users
+            .FirstOrDefaultAsync(u => u.Username.ToLower() == dto.Username.Trim().ToLower());
+
+        if (user == null)
+            return NotFound("User not found.");
+
+        return Ok(new { question = user.SecurityQuestion });
+    }
+
+    // 2. Reset Password via Security Question Verification
+    [HttpPost("reset-password")]
+    public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordDto dto)
+    {
+        var user = await _context.Users
+            .FirstOrDefaultAsync(u => u.Username.ToLower() == dto.Username.Trim().ToLower());
+
+        if (user == null)
+            return NotFound("User not found.");
+
+        var answerHash = HashString(dto.SecurityAnswer.Trim().ToLowerInvariant());
+        if (user.SecurityAnswerHash != answerHash)
+            return BadRequest("Incorrect answer to security question.");
+
+        var passwordErrors = ValidatePassword(dto.NewPassword);
+        if (passwordErrors.Any())
+            return BadRequest(string.Join(" ", passwordErrors));
+
+        user.PasswordHash = HashString(dto.NewPassword);
+        await _context.SaveChangesAsync();
+
+        return Ok(new { message = "Password reset successfully! Please sign in with your new password." });
+    }
+
+    // 3. Change Password from Profile Settings
+    [HttpPost("change-password")]
+    public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordDto dto)
+    {
+        var currentHash = HashString(dto.CurrentPassword);
+        var user = await _context.Users
+            .FirstOrDefaultAsync(u => u.Username.ToLower() == dto.Username.Trim().ToLower() && u.PasswordHash == currentHash);
+
+        if (user == null)
+            return BadRequest("Current password is incorrect.");
+
+        var passwordErrors = ValidatePassword(dto.NewPassword);
+        if (passwordErrors.Any())
+            return BadRequest(string.Join(" ", passwordErrors));
+
+        user.PasswordHash = HashString(dto.NewPassword);
+        await _context.SaveChangesAsync();
+
+        return Ok(new { message = "Password changed successfully!" });
+    }
+
+    // 4. Update Profile Avatar
+    [HttpPost("update-profile")]
+    public async Task<IActionResult> UpdateProfile([FromBody] UpdateProfileDto dto)
+    {
+        var user = await _context.Users
+            .FirstOrDefaultAsync(u => u.Username.ToLower() == dto.Username.Trim().ToLower());
+
+        if (user == null)
+            return NotFound("User not found.");
+
+        user.AvatarUrl = dto.AvatarUrl;
+        await _context.SaveChangesAsync();
+
+        return Ok(new { username = user.Username, avatarUrl = user.AvatarUrl, message = "Profile updated!" });
     }
 
     private static List<string> ValidatePassword(string password)
     {
         var errors = new List<string>();
-
         if (password.Length < 8)
             errors.Add("Password must be at least 8 characters long.");
         if (password.Contains(' '))
@@ -82,10 +158,10 @@ public class AuthController : ControllerBase
         return errors;
     }
 
-    private static string HashPassword(string password)
+    private static string HashString(string input)
     {
         using var sha256 = SHA256.Create();
-        var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(password));
+        var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(input));
         return Convert.ToBase64String(bytes);
     }
 }

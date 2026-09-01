@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useSyncExternalStore } from "react";
 
 interface Product {
   id: number;
@@ -20,24 +20,54 @@ const CURRENCY_RATES: Record<Currency, { symbol: string; rate: number }> = {
   INR: { symbol: "₹", rate: 90.0 },
 };
 
+const SECURITY_QUESTIONS = [
+  "What was the name of your first pet?",
+  "In what city were you born?",
+  "What is your mother's maiden name?",
+  "What was the model of your first car?",
+  "What was your elementary school name?",
+];
+
+const PRESET_AVATARS = ["👨‍💻", "👩‍💻", "🦊", "🚀", "⚡", "📦", "💼", "🤖"];
+
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "https://inventory-management-system-zbt4.onrender.com/api";
 
-export default function InventoryDashboard() {
-  const [currentUser, setCurrentUser] = useState<string | null>(() => {
-    if (typeof window !== "undefined") {
-      return localStorage.getItem("inventory_user");
-    }
-    return null;
-  });
+// Empty subscribe for read-only hydration detection
+const emptySubscribe = () => () => {};
 
-  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+export default function InventoryDashboard() {
+  // Safe hydration check compliant with React 19 rules
+  const mounted = useSyncExternalStore(
+    emptySubscribe,
+    () => true,
+    () => false
+  );
+
+  const [currentUser, setCurrentUser] = useState<string | null>(null);
+  const [currentAvatar, setCurrentAvatar] = useState<string>("👨‍💻");
+
+  // Auth Navigation states: 'login' | 'register' | 'forgot_step1' | 'forgot_step2'
+  const [authMode, setAuthMode] = useState<"login" | "register" | "forgot_step1" | "forgot_step2">("login");
   const [authUsername, setAuthUsername] = useState("");
   const [authPassword, setAuthPassword] = useState("");
+  const [securityQuestion, setSecurityQuestion] = useState(SECURITY_QUESTIONS[0]);
+  const [securityAnswer, setSecurityAnswer] = useState("");
+  const [fetchedQuestion, setFetchedQuestion] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+
   const [showPassword, setShowPassword] = useState(false);
   const [authError, setAuthError] = useState("");
   const [authSuccess, setAuthSuccess] = useState("");
 
-  // Product state
+  // Profile Modal State
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [profileOldPassword, setProfileOldPassword] = useState("");
+  const [profileNewPassword, setProfileNewPassword] = useState("");
+  const [profileMsg, setProfileMsg] = useState("");
+  const [profileError, setProfileError] = useState("");
+  const [showProfilePassword, setShowProfilePassword] = useState(false);
+
+  // Products State
   const [products, setProducts] = useState<Product[]>([]);
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
@@ -67,6 +97,15 @@ export default function InventoryDashboard() {
     let isSubscribed = true;
 
     async function init() {
+      // Read saved local session asynchronously inside effect
+      const savedUser = localStorage.getItem("inventory_user");
+      const savedAvatar = localStorage.getItem("inventory_avatar");
+
+      if (isSubscribed) {
+        if (savedUser) setCurrentUser(savedUser);
+        if (savedAvatar) setCurrentAvatar(savedAvatar);
+      }
+
       try {
         const res = await fetch(`${API_BASE}/products`);
         if (res.ok && isSubscribed) {
@@ -92,7 +131,7 @@ export default function InventoryDashboard() {
     if (/\s/.test(pass)) return "Password must not contain spaces.";
     if (!/[A-Z]/.test(pass)) return "Password must include at least one uppercase letter (A-Z).";
     if (!/[0-9]/.test(pass)) return "Password must include at least one number (0-9).";
-    if (!/[^A-Za-z0-9]/.test(pass)) return "Password must include at least one special character (!@#$%^&*...).";
+    if (!/[^A-Za-z0-9\s]/.test(pass)) return "Password must include at least one special character (!@#$%^&*...).";
     return null;
   };
 
@@ -111,29 +150,42 @@ export default function InventoryDashboard() {
 
     setLoading(true);
 
-    const endpoint = authMode === "login" ? `${API_BASE}/auth/login` : `${API_BASE}/auth/register`;
-
     try {
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: authUsername.trim(), password: authPassword }),
-      });
-
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(errText || "Authentication failed.");
-      }
-
-      const data = await res.json();
-
       if (authMode === "register") {
+        const res = await fetch(`${API_BASE}/auth/register`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: authUsername.trim(),
+            password: authPassword,
+            securityQuestion,
+            securityAnswer: securityAnswer.trim(),
+            avatarUrl: "👨‍💻",
+          }),
+        });
+
+        if (!res.ok) throw new Error((await res.text()) || "Registration failed.");
+
         setAuthMode("login");
         setAuthPassword("");
+        setSecurityAnswer("");
         setShowPassword(false);
         setAuthSuccess("Account created successfully! Please sign in.");
-      } else {
+      } else if (authMode === "login") {
+        const res = await fetch(`${API_BASE}/auth/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: authUsername.trim(), password: authPassword }),
+        });
+
+        if (!res.ok) throw new Error((await res.text()) || "Invalid login credentials.");
+
+        const data = await res.json();
         localStorage.setItem("inventory_user", data.username);
+        if (data.avatarUrl) {
+          localStorage.setItem("inventory_avatar", data.avatarUrl);
+          setCurrentAvatar(data.avatarUrl);
+        }
         setCurrentUser(data.username);
         setAuthUsername("");
         setAuthPassword("");
@@ -141,18 +193,126 @@ export default function InventoryDashboard() {
         refreshInventory();
       }
     } catch (err: unknown) {
-      if (err instanceof Error) {
-        setAuthError(err.message);
-      } else {
-        setAuthError("An unexpected error occurred.");
-      }
+      setAuthError(err instanceof Error ? err.message : "An unexpected error occurred.");
     } finally {
       setLoading(false);
     }
   };
 
+  const handleFetchQuestion = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError("");
+    setLoading(true);
+
+    try {
+      const res = await fetch(`${API_BASE}/auth/get-question`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: authUsername.trim() }),
+      });
+
+      if (!res.ok) throw new Error((await res.text()) || "User not found.");
+
+      const data = await res.json();
+      setFetchedQuestion(data.question);
+      setAuthMode("forgot_step2");
+    } catch (err: unknown) {
+      setAuthError(err instanceof Error ? err.message : "Failed to retrieve user.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError("");
+
+    const errorMsg = validatePasswordRules(newPassword);
+    if (errorMsg) {
+      setAuthError(errorMsg);
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const res = await fetch(`${API_BASE}/auth/reset-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: authUsername.trim(),
+          securityAnswer: securityAnswer.trim(),
+          newPassword,
+        }),
+      });
+
+      if (!res.ok) throw new Error((await res.text()) || "Password reset failed.");
+
+      setAuthMode("login");
+      setAuthPassword("");
+      setNewPassword("");
+      setSecurityAnswer("");
+      setShowPassword(false);
+      setAuthSuccess("Password has been reset successfully! Please sign in.");
+    } catch (err: unknown) {
+      setAuthError(err instanceof Error ? err.message : "Reset failed.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setProfileError("");
+    setProfileMsg("");
+
+    const err = validatePasswordRules(profileNewPassword);
+    if (err) {
+      setProfileError(err);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/auth/change-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: currentUser,
+          currentPassword: profileOldPassword,
+          newPassword: profileNewPassword,
+        }),
+      });
+
+      if (!res.ok) throw new Error((await res.text()) || "Password change failed.");
+
+      setProfileMsg("Password successfully updated!");
+      setProfileOldPassword("");
+      setProfileNewPassword("");
+    } catch (err: unknown) {
+      setProfileError(err instanceof Error ? err.message : "Update failed.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUpdateAvatar = async (avatar: string) => {
+    setCurrentAvatar(avatar);
+    localStorage.setItem("inventory_avatar", avatar);
+    try {
+      await fetch(`${API_BASE}/auth/update-profile`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: currentUser, avatarUrl: avatar }),
+      });
+    } catch (err) {
+      console.error("Avatar update error:", err);
+    }
+  };
+
   const handleLogout = () => {
     localStorage.removeItem("inventory_user");
+    localStorage.removeItem("inventory_avatar");
     setCurrentUser(null);
   };
 
@@ -247,10 +407,7 @@ export default function InventoryDashboard() {
       const res = await fetch(`${API_BASE}/products/${id}/stock`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          change,
-          username: currentUser,
-        }),
+        body: JSON.stringify({ change, username: currentUser }),
       });
       if (res.ok) refreshInventory();
     } catch (err: unknown) {
@@ -267,7 +424,19 @@ export default function InventoryDashboard() {
     }
   };
 
-  // Login / Register View
+  // Prevent hydration mismatch by displaying a neutral loader until client is ready
+  if (!mounted) {
+    return (
+      <main className="min-h-screen bg-slate-100 flex items-center justify-center p-4 font-sans text-slate-800">
+        <div className="text-center">
+          <span className="text-3xl animate-spin inline-block mb-3">📦</span>
+          <p className="text-slate-500 text-sm font-medium">Loading portal...</p>
+        </div>
+      </main>
+    );
+  }
+
+  // --- Auth View (Unauthenticated) ---
   if (!currentUser) {
     return (
       <main className="min-h-screen bg-slate-100 flex items-center justify-center p-4 font-sans text-slate-800">
@@ -275,7 +444,10 @@ export default function InventoryDashboard() {
           <div className="text-center mb-6">
             <h1 className="text-2xl font-bold text-slate-900 tracking-tight">📦 Inventory Portal</h1>
             <p className="text-slate-500 text-sm mt-1">
-              {authMode === "login" ? "Sign in to manage inventory & track changes" : "Create a new user profile"}
+              {authMode === "login" && "Sign in to manage inventory & track changes"}
+              {authMode === "register" && "Create a new user account with security key"}
+              {authMode === "forgot_step1" && "Reset Password - Step 1 of 2"}
+              {authMode === "forgot_step2" && "Reset Password - Step 2 of 2"}
             </p>
           </div>
 
@@ -291,102 +463,206 @@ export default function InventoryDashboard() {
             </div>
           )}
 
-          <form onSubmit={handleAuth} className="space-y-4">
-            <div>
-              <label className="block text-xs font-semibold text-slate-600 mb-1">Username</label>
-              <input
-                type="text"
-                required
-                value={authUsername}
-                onChange={(e) => setAuthUsername(e.target.value)}
-                placeholder="e.g. Muster"
-                className="w-full p-2.5 border border-slate-300 rounded-lg text-sm bg-white focus:outline-blue-500"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-600 mb-1">Password</label>
-              <div className="relative">
+          {/* 1. Login & Register Form */}
+          {(authMode === "login" || authMode === "register") && (
+            <form onSubmit={handleAuth} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Username</label>
                 <input
-                  type={showPassword ? "text" : "password"}
+                  type="text"
                   required
-                  value={authPassword}
-                  onChange={(e) => setAuthPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full p-2.5 pr-10 border border-slate-300 rounded-lg text-sm bg-white focus:outline-blue-500"
+                  value={authUsername}
+                  onChange={(e) => setAuthUsername(e.target.value)}
+                  placeholder="e.g. Muster"
+                  className="w-full p-2.5 border border-slate-300 rounded-lg text-sm bg-white focus:outline-blue-500"
                 />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 focus:outline-none cursor-pointer"
-                  aria-label={showPassword ? "Hide password" : "Show password"}
-                >
-                  {showPassword ? (
-                    // Eye Slash (Hide Password)
-                    <svg
-                      xmlns="http://www.w3.org/2000/svg"
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      strokeWidth={2}
-                      stroke="currentColor"
-                      className="w-5 h-5"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88"
-                      />
-                    </svg>
-                  ) : (
-                    // Eye (Show Password)
-                    <svg
-                      xmlns="http://www.w3.org/2000/svg"
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      strokeWidth={2}
-                      stroke="currentColor"
-                      className="w-5 h-5"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z"
-                      />
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-                      />
-                    </svg>
-                  )}
-                </button>
               </div>
 
-              {authMode === "register" && (
-                <div className="mt-2 p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-[11px] text-slate-500 space-y-1">
-                  <p className="font-semibold text-slate-600">Password requirements:</p>
-                  <ul className="list-disc pl-4 space-y-0.5">
-                    <li className={authPassword.length >= 8 ? "text-emerald-600 font-medium" : ""}>At least 8 characters</li>
-                    <li className={/[A-Z]/.test(authPassword) ? "text-emerald-600 font-medium" : ""}>At least one uppercase letter (A-Z)</li>
-                    <li className={/[0-9]/.test(authPassword) ? "text-emerald-600 font-medium" : ""}>At least one number (0-9)</li>
-                    <li className={/[^A-Za-z0-9\s]/.test(authPassword) ? "text-emerald-600 font-medium" : ""}>At least one special character (!@#$%^&*...)</li>
-                    <li className={authPassword && !/\s/.test(authPassword) ? "text-emerald-600 font-medium" : ""}>No spaces</li>
-                  </ul>
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="text-xs font-semibold text-slate-600">Password</label>
+                  {authMode === "login" && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthMode("forgot_step1");
+                        setAuthError("");
+                        setAuthSuccess("");
+                      }}
+                      className="text-xs text-blue-600 hover:underline cursor-pointer"
+                    >
+                      Forgot password?
+                    </button>
+                  )}
                 </div>
+                <div className="relative">
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    required
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full p-2.5 pr-10 border border-slate-300 rounded-lg text-sm bg-white focus:outline-blue-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 focus:outline-none cursor-pointer"
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                  >
+                    {showPassword ? (
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" />
+                      </svg>
+                    ) : (
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Registration Extra Fields */}
+              {authMode === "register" && (
+                <>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Security Question</label>
+                    <select
+                      value={securityQuestion}
+                      onChange={(e) => setSecurityQuestion(e.target.value)}
+                      className="w-full p-2.5 border border-slate-300 rounded-lg text-sm bg-white focus:outline-blue-500"
+                    >
+                      {SECURITY_QUESTIONS.map((q, idx) => (
+                        <option key={idx} value={q}>{q}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Security Answer</label>
+                    <input
+                      type="text"
+                      required
+                      value={securityAnswer}
+                      onChange={(e) => setSecurityAnswer(e.target.value)}
+                      placeholder="Your secret answer (case-insensitive)"
+                      className="w-full p-2.5 border border-slate-300 rounded-lg text-sm bg-white focus:outline-blue-500"
+                    />
+                  </div>
+
+                  <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-[11px] text-slate-500 space-y-1">
+                    <p className="font-semibold text-slate-600">Password requirements:</p>
+                    <ul className="list-disc pl-4 space-y-0.5">
+                      <li className={authPassword.length >= 8 ? "text-emerald-600 font-medium" : ""}>At least 8 characters</li>
+                      <li className={/[A-Z]/.test(authPassword) ? "text-emerald-600 font-medium" : ""}>At least one uppercase letter (A-Z)</li>
+                      <li className={/[0-9]/.test(authPassword) ? "text-emerald-600 font-medium" : ""}>At least one number (0-9)</li>
+                      <li className={/[^A-Za-z0-9\s]/.test(authPassword) ? "text-emerald-600 font-medium" : ""}>At least one special character (!@#$%^&*...)</li>
+                      <li className={authPassword && !/\s/.test(authPassword) ? "text-emerald-600 font-medium" : ""}>No spaces</li>
+                    </ul>
+                  </div>
+                </>
               )}
-            </div>
 
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg p-2.5 text-sm transition disabled:opacity-50"
-            >
-              {loading ? "Processing..." : authMode === "login" ? "Sign In" : "Create Account"}
-            </button>
-          </form>
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg p-2.5 text-sm transition disabled:opacity-50 cursor-pointer"
+              >
+                {loading ? "Processing..." : authMode === "login" ? "Sign In" : "Create Account"}
+              </button>
+            </form>
+          )}
 
+          {/* 2. Forgot Password Step 1 */}
+          {authMode === "forgot_step1" && (
+            <form onSubmit={handleFetchQuestion} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Enter Your Username</label>
+                <input
+                  type="text"
+                  required
+                  value={authUsername}
+                  onChange={(e) => setAuthUsername(e.target.value)}
+                  placeholder="Username registered on your account"
+                  className="w-full p-2.5 border border-slate-300 rounded-lg text-sm bg-white focus:outline-blue-500"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg p-2.5 text-sm transition disabled:opacity-50 cursor-pointer"
+              >
+                {loading ? "Checking..." : "Continue"}
+              </button>
+            </form>
+          )}
+
+          {/* 3. Forgot Password Step 2 */}
+          {authMode === "forgot_step2" && (
+            <form onSubmit={handleResetPassword} className="space-y-4">
+              <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                <p className="text-xs text-blue-600 font-semibold uppercase tracking-wide">Security Question:</p>
+                <p className="text-sm text-blue-900 font-medium mt-0.5">{fetchedQuestion}</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Your Security Answer</label>
+                <input
+                  type="text"
+                  required
+                  value={securityAnswer}
+                  onChange={(e) => setSecurityAnswer(e.target.value)}
+                  placeholder="Enter the answer you set during registration"
+                  className="w-full p-2.5 border border-slate-300 rounded-lg text-sm bg-white focus:outline-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">New Password</label>
+                <div className="relative">
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    required
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="Enter strong new password"
+                    className="w-full p-2.5 pr-10 border border-slate-300 rounded-lg text-sm bg-white focus:outline-blue-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 focus:outline-none cursor-pointer"
+                  >
+                    {showPassword ? (
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" />
+                      </svg>
+                    ) : (
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg p-2.5 text-sm transition disabled:opacity-50 cursor-pointer"
+              >
+                {loading ? "Resetting..." : "Set New Password"}
+              </button>
+            </form>
+          )}
+
+          {/* Footer Auth Switcher */}
           <div className="mt-6 text-center text-xs text-slate-500">
-            {authMode === "login" ? (
+            {authMode === "login" && (
               <span>
                 Don&apos;t have an account?{" "}
                 <button
@@ -397,14 +673,15 @@ export default function InventoryDashboard() {
                     setAuthSuccess("");
                     setShowPassword(false);
                   }}
-                  className="text-blue-600 font-semibold hover:underline"
+                  className="text-blue-600 font-semibold hover:underline cursor-pointer"
                 >
                   Register here
                 </button>
               </span>
-            ) : (
+            )}
+            {(authMode === "register" || authMode === "forgot_step1" || authMode === "forgot_step2") && (
               <span>
-                Already have an account?{" "}
+                Back to{" "}
                 <button
                   type="button"
                   onClick={() => {
@@ -413,7 +690,7 @@ export default function InventoryDashboard() {
                     setAuthSuccess("");
                     setShowPassword(false);
                   }}
-                  className="text-blue-600 font-semibold hover:underline"
+                  className="text-blue-600 font-semibold hover:underline cursor-pointer"
                 >
                   Sign in
                 </button>
@@ -425,20 +702,36 @@ export default function InventoryDashboard() {
     );
   }
 
-  // Main Dashboard View (Authenticated)
+  // --- Main Dashboard View (Authenticated) ---
   return (
     <main className="max-w-6xl mx-auto p-6 md:p-10 font-sans text-slate-800">
+      {/* Header */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
         <div>
           <h1 className="text-3xl font-bold text-slate-900 tracking-tight">
             📦 Inventory Management
           </h1>
           <p className="text-slate-500 text-sm mt-1">
-            Active User: <span className="font-semibold text-blue-700">@{currentUser}</span>
+            Monitor stock levels, track valuations, and manage products.
           </p>
         </div>
 
         <div className="flex items-center gap-3">
+          {/* Profile Button */}
+          <button
+            onClick={() => {
+              setIsProfileOpen(true);
+              setProfileError("");
+              setProfileMsg("");
+            }}
+            className="flex items-center gap-2 px-3 py-1.5 bg-white border border-slate-200 hover:border-slate-300 rounded-lg shadow-sm transition cursor-pointer"
+          >
+            <span className="text-lg">{currentAvatar}</span>
+            <span className="text-xs font-semibold text-slate-700">@{currentUser}</span>
+            <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">Settings</span>
+          </button>
+
+          {/* Currency Dropdown */}
           <div className="flex items-center gap-2 bg-white border border-slate-200 p-2 rounded-lg shadow-sm">
             <label htmlFor="currency-select" className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
               Currency:
@@ -458,7 +751,7 @@ export default function InventoryDashboard() {
 
           <button
             onClick={handleLogout}
-            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 rounded-lg text-xs font-semibold transition"
+            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 rounded-lg text-xs font-semibold transition cursor-pointer"
           >
             Sign Out
           </button>
@@ -521,7 +814,7 @@ export default function InventoryDashboard() {
           <button
             type="submit"
             disabled={loading}
-            className="bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg p-2.5 text-sm transition disabled:opacity-50"
+            className="bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg p-2.5 text-sm transition disabled:opacity-50 cursor-pointer"
           >
             {loading ? "Adding..." : "+ Add Product"}
           </button>
@@ -599,14 +892,14 @@ export default function InventoryDashboard() {
                           <button
                             type="button"
                             onClick={() => saveEdit(p.id, p.stockQuantity)}
-                            className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md text-xs font-medium transition"
+                            className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md text-xs font-medium transition cursor-pointer"
                           >
                             Save
                           </button>
                           <button
                             type="button"
                             onClick={cancelEditing}
-                            className="px-3 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-md text-xs font-medium transition"
+                            className="px-3 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-md text-xs font-medium transition cursor-pointer"
                           >
                             Cancel
                           </button>
@@ -616,28 +909,28 @@ export default function InventoryDashboard() {
                           <button
                             type="button"
                             onClick={() => handleStockChange(p.id, 1)}
-                            className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md text-xs font-medium border border-slate-200 transition"
+                            className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md text-xs font-medium border border-slate-200 transition cursor-pointer"
                           >
                             + Restock
                           </button>
                           <button
                             type="button"
                             onClick={() => handleStockChange(p.id, -1)}
-                            className="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 rounded-md text-xs font-medium border border-amber-200 transition"
+                            className="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 rounded-md text-xs font-medium border border-amber-200 transition cursor-pointer"
                           >
                             - Sell
                           </button>
                           <button
                             type="button"
                             onClick={() => startEditing(p)}
-                            className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-md text-xs font-medium border border-blue-200 transition"
+                            className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-md text-xs font-medium border border-blue-200 transition cursor-pointer"
                           >
                             Edit
                           </button>
                           <button
                             type="button"
                             onClick={() => deleteProduct(p.id)}
-                            className="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 rounded-md text-xs font-medium border border-red-200 transition"
+                            className="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 rounded-md text-xs font-medium border border-red-200 transition cursor-pointer"
                           >
                             Delete
                           </button>
@@ -651,6 +944,109 @@ export default function InventoryDashboard() {
           </tbody>
         </table>
       </div>
+
+      {/* Profile & Settings Modal */}
+      {isProfileOpen && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl p-6 md:p-8 max-w-md w-full shadow-2xl border border-slate-200">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-xl font-bold text-slate-900">User Profile Settings</h3>
+              <button
+                onClick={() => setIsProfileOpen(false)}
+                className="text-slate-400 hover:text-slate-600 text-sm font-semibold cursor-pointer"
+              >
+                ✕ Close
+              </button>
+            </div>
+
+            {/* Profile Avatar Chooser */}
+            <div className="mb-6">
+              <label className="block text-xs font-semibold text-slate-600 mb-2">Choose Avatar</label>
+              <div className="flex gap-2 flex-wrap">
+                {PRESET_AVATARS.map((emoji) => (
+                  <button
+                    key={emoji}
+                    type="button"
+                    onClick={() => handleUpdateAvatar(emoji)}
+                    className={`text-2xl p-2 rounded-xl border transition cursor-pointer ${
+                      currentAvatar === emoji ? "border-blue-600 bg-blue-50" : "border-slate-200 hover:bg-slate-50"
+                    }`}
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Change Password Form */}
+            <form onSubmit={handleChangePassword} className="space-y-4">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400">Change Password</h4>
+
+              {profileMsg && (
+                <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs rounded-lg">
+                  ✓ {profileMsg}
+                </div>
+              )}
+
+              {profileError && (
+                <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg">
+                  {profileError}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Current Password</label>
+                <input
+                  type="password"
+                  required
+                  value={profileOldPassword}
+                  onChange={(e) => setProfileOldPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full p-2.5 border border-slate-300 rounded-lg text-sm bg-white focus:outline-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">New Password</label>
+                <div className="relative">
+                  <input
+                    type={showProfilePassword ? "text" : "password"}
+                    required
+                    value={profileNewPassword}
+                    onChange={(e) => setProfileNewPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full p-2.5 pr-10 border border-slate-300 rounded-lg text-sm bg-white focus:outline-blue-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowProfilePassword(!showProfilePassword)}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 focus:outline-none cursor-pointer"
+                  >
+                    {showProfilePassword ? (
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" />
+                      </svg>
+                    ) : (
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg p-2.5 text-sm transition disabled:opacity-50 cursor-pointer"
+              >
+                {loading ? "Updating..." : "Update Password"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
