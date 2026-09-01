@@ -13,7 +13,8 @@ interface Product {
 
 type Currency = "EUR" | "USD" | "GBP" | "INR";
 
-const CURRENCY_RATES: Record<Currency, { symbol: string; rate: number }> = {
+// Initial fallbacks in case network is slow or offline
+const DEFAULT_RATES: Record<Currency, { symbol: string; rate: number }> = {
   EUR: { symbol: "€", rate: 1.0 },
   USD: { symbol: "$", rate: 1.08 },
   GBP: { symbol: "£", rate: 0.85 },
@@ -32,7 +33,6 @@ const PRESET_AVATARS = ["👨‍💻", "👩‍💻", "🦊", "🚀", "⚡", "�
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "https://inventory-management-system-zbt4.onrender.com/api";
 
-// Empty subscribe for read-only hydration detection
 const emptySubscribe = () => () => {};
 
 export default function InventoryDashboard() {
@@ -42,6 +42,9 @@ export default function InventoryDashboard() {
     () => true,
     () => false
   );
+
+  // Dynamic Live Exchange Rates State
+  const [rates, setRates] = useState(DEFAULT_RATES);
 
   const [currentUser, setCurrentUser] = useState<string | null>(null);
   const [currentAvatar, setCurrentAvatar] = useState<string>("👨‍💻");
@@ -93,11 +96,35 @@ export default function InventoryDashboard() {
     }
   };
 
+  // 1. Fetch Live Exchange Rates
+  useEffect(() => {
+    async function fetchLiveRates() {
+      try {
+        const res = await fetch("https://open.er-api.com/v6/latest/EUR");
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.rates) {
+            setRates({
+              EUR: { symbol: "€", rate: 1.0 },
+              USD: { symbol: "$", rate: data.rates.USD || 1.08 },
+              GBP: { symbol: "£", rate: data.rates.GBP || 0.85 },
+              INR: { symbol: "₹", rate: data.rates.INR || 90.0 },
+            });
+          }
+        }
+      } catch (err) {
+        console.warn("Could not fetch live forex rates, using fallback rates.", err);
+      }
+    }
+
+    fetchLiveRates();
+  }, []);
+
+  // 2. Initial Data & Session Restore
   useEffect(() => {
     let isSubscribed = true;
 
     async function init() {
-      // Read saved local session asynchronously inside effect
       const savedUser = localStorage.getItem("inventory_user");
       const savedAvatar = localStorage.getItem("inventory_avatar");
 
@@ -316,6 +343,7 @@ export default function InventoryDashboard() {
     setCurrentUser(null);
   };
 
+  // Uses dynamic live rates
   const stats = useMemo(() => {
     const totalItems = products.length;
     const totalUnits = products.reduce((acc, p) => acc + p.stockQuantity, 0);
@@ -323,13 +351,14 @@ export default function InventoryDashboard() {
     return {
       totalItems,
       totalUnits,
-      totalValueConverted: totalValueEur * CURRENCY_RATES[currency].rate,
+      totalValueConverted: totalValueEur * rates[currency].rate,
     };
-  }, [products, currency]);
+  }, [products, currency, rates]);
 
+  // Uses dynamic live rates
   const formatPrice = (basePriceEur: number) => {
-    const converted = basePriceEur * CURRENCY_RATES[currency].rate;
-    return `${CURRENCY_RATES[currency].symbol}${converted.toFixed(2)}`;
+    const converted = basePriceEur * rates[currency].rate;
+    return `${rates[currency].symbol}${converted.toFixed(2)}`;
   };
 
   const addProduct = async (e: React.FormEvent) => {
@@ -338,7 +367,7 @@ export default function InventoryDashboard() {
     setLoading(true);
 
     const inputPrice = parseFloat(price);
-    const basePriceEur = inputPrice / CURRENCY_RATES[currency].rate;
+    const basePriceEur = inputPrice / rates[currency].rate;
 
     try {
       const res = await fetch(`${API_BASE}/products`, {
@@ -365,7 +394,7 @@ export default function InventoryDashboard() {
   const startEditing = (p: Product) => {
     setEditingId(p.id);
     setEditName(p.name);
-    setEditPrice((p.price * CURRENCY_RATES[currency].rate).toFixed(2));
+    setEditPrice((p.price * rates[currency].rate).toFixed(2));
   };
 
   const cancelEditing = () => {
@@ -377,7 +406,7 @@ export default function InventoryDashboard() {
   const saveEdit = async (id: number, currentStock: number) => {
     if (!currentUser) return;
     const inputPrice = parseFloat(editPrice);
-    const basePriceEur = inputPrice / CURRENCY_RATES[currency].rate;
+    const basePriceEur = inputPrice / rates[currency].rate;
 
     try {
       const res = await fetch(`${API_BASE}/products/${id}`, {
@@ -424,7 +453,6 @@ export default function InventoryDashboard() {
     }
   };
 
-  // Prevent hydration mismatch by displaying a neutral loader until client is ready
   if (!mounted) {
     return (
       <main className="min-h-screen bg-slate-100 flex items-center justify-center p-4 font-sans text-slate-800">
@@ -436,7 +464,7 @@ export default function InventoryDashboard() {
     );
   }
 
-  // --- Auth View (Unauthenticated) ---
+  // Unauthenticated View
   if (!currentUser) {
     return (
       <main className="min-h-screen bg-slate-100 flex items-center justify-center p-4 font-sans text-slate-800">
@@ -473,7 +501,7 @@ export default function InventoryDashboard() {
                   required
                   value={authUsername}
                   onChange={(e) => setAuthUsername(e.target.value)}
-                  placeholder="e.g. Muster"
+                  placeholder="e.g. jaldeep"
                   className="w-full p-2.5 border border-slate-300 rounded-lg text-sm bg-white focus:outline-blue-500"
                 />
               </div>
@@ -524,7 +552,6 @@ export default function InventoryDashboard() {
                 </div>
               </div>
 
-              {/* Registration Extra Fields */}
               {authMode === "register" && (
                 <>
                   <div>
@@ -702,7 +729,7 @@ export default function InventoryDashboard() {
     );
   }
 
-  // --- Main Dashboard View (Authenticated) ---
+  // Authenticated Dashboard View
   return (
     <main className="max-w-6xl mx-auto p-6 md:p-10 font-sans text-slate-800">
       {/* Header */}
@@ -777,7 +804,7 @@ export default function InventoryDashboard() {
         <div className="bg-white border border-slate-200 p-5 rounded-xl shadow-sm">
           <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Total Valuation</span>
           <p className="text-2xl font-bold text-emerald-600 mt-1">
-            {CURRENCY_RATES[currency].symbol}{stats.totalValueConverted.toFixed(2)}
+            {rates[currency].symbol}{stats.totalValueConverted.toFixed(2)}
           </p>
         </div>
       </div>
@@ -797,7 +824,7 @@ export default function InventoryDashboard() {
           <input
             type="number"
             step="0.01"
-            placeholder={`Price in ${CURRENCY_RATES[currency].symbol}`}
+            placeholder={`Price in ${rates[currency].symbol}`}
             value={price}
             onChange={(e) => setPrice(e.target.value)}
             required
