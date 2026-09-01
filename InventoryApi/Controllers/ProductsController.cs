@@ -61,6 +61,27 @@ namespace InventoryApi.Controllers
             return Ok(product);
         }
 
+        // PUT: api/products/5
+[HttpPut("{id}")]
+public async Task<IActionResult> UpdateProduct(int id, Product updatedProduct)
+{
+    if (id != updatedProduct.Id)
+        return BadRequest("Product ID mismatch.");
+
+    if (updatedProduct.Price < 0 || updatedProduct.StockQuantity < 0)
+        return BadRequest("Price and Stock Quantity cannot be negative.");
+
+    var product = await _context.Products.FindAsync(id);
+    if (product == null) return NotFound("Product not found.");
+
+    product.Name = updatedProduct.Name;
+    product.Price = updatedProduct.Price;
+    product.StockQuantity = updatedProduct.StockQuantity;
+
+    await _context.SaveChangesAsync();
+    return Ok(product);
+}
+
         // DELETE: api/products/5
         [HttpDelete("{id}")]
         public async Task<IActionResult> DeleteProduct(int id)
